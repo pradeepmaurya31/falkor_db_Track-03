@@ -86,7 +86,7 @@ export default function ChatDrawer({ token }) {
 
   return (
     <div className="w-96 h-screen bg-white border-l flex flex-col fixed right-0 top-0 shadow-xl">
-      <div className="bg-blue-600 text-white p-4 font-bold">Enterprise Assistant</div>
+      <div className="bg-blue-600 text-white p-4 font-bold">Maurya corp's AI Assistant</div>
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.map((m, i) => (
           <div

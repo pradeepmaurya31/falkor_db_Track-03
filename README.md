@@ -58,10 +58,60 @@ The application is built around a simple enterprise operating model:
 - `backend/auth.py` — JWT generation and password verification
 - `backend/database.py` — FalkorDB connection and initialization logic
 - `backend/agent.py` — chat/AI intent classification, guardrails, and employee creation logic
+- `backend/graph_queries.py` — prebuilt graph query templates for CRUD operations
+- `backend/graph_agent.py` — master execution layer for role-enforced graph actions
 - `backend/enterprise_data.py` — enterprise records, permissions, and dashboard data helpers
 - `backend/env.example` — environment template for secrets and cloud configuration
 - `frontend/src/App.jsx` — main dashboard and login UI
 - `frontend/src/ChatDrawer.jsx` — chat interface
+
+## Graph model and agent query flow
+
+The platform stores enterprise data as graph nodes and relationships instead of ad hoc tables. The agent does not generate Cypher on the fly for common actions; it executes a prebuilt query set from the query registry.
+
+```mermaid
+flowchart TD
+    A[SuperAdmin / Admin / Manager / Employee] --> B[Chat Agent]
+    B --> C[Role Guardrail]
+    C --> D[Master Graph Agent]
+    D --> E[Prebuilt Cypher Query Library]
+
+    E --> U[User Node]
+    E --> T[Ticket Node]
+    E --> P[Project Node]
+    E --> A2[Attendance Node]
+    E --> H[Holiday Node]
+
+    U --> R1[HAS_ROLE]
+    U --> R2[REPORTS_TO]
+    U --> R3[ASSIGNED_TO]
+
+    T --> R4[CREATED_BY]
+    P --> R5[OWNED_BY]
+    A2 --> R6[FOR_USER]
+
+    D --> F[Execution Result]
+    F --> G[Dashboard / Chat Response]
+```
+
+### Example graph relationships
+
+- `(:User)-[:HAS_ROLE]->(:Role)`
+- `(:User)-[:REPORTS_TO]->(:User)`
+- `(:User)-[:ASSIGNED_TO]->(:Project)`
+- `(:User)-[:CREATED_TICKET]->(:Ticket)`
+- `(:Ticket)-[:APPROVED_BY]->(:User)`
+- `(:User)-[:HAS_ATTENDANCE]->(:Attendance)`
+
+### How the agent works
+
+1. User sends a chat request such as "Add employee John Doe"
+2. The chat agent identifies the intent and validates role access
+3. A master graph-execution function selects the correct prebuilt Cypher query
+4. The query runs against the FalkorDB graph
+5. The result is returned back to the dashboard or chat interface
+
+This keeps CRUD logic deterministic, permission-aware, and much faster than rewriting dynamic Cypher for every command.
 
 ## Environment configuration
 
