@@ -16,6 +16,7 @@ from backend.auth import create_access_token, get_current_user, verify_password
 from backend.database import get_falkordb_connection, init_super_admin, seed_demo_graph_data
 from backend.enterprise_data import (
     ROLE_PERMISSIONS,
+    approve_ticket_record,
     create_holiday_record,
     create_project_record,
     create_ticket_record,
@@ -53,7 +54,7 @@ app.add_middleware(
 
 
 def require_permission(role: str, permission: str):
-    permissions = set(ROLE_PERMISSIONS.get(role, []))
+    permissions = set(get_role_permissions(role))
     if permission not in permissions:
         raise HTTPException(status_code=403, detail=f"Role '{role}' does not have access to '{permission}'.")
 
@@ -180,19 +181,38 @@ def delete_project(project_id: str, current_user: dict = Depends(get_current_use
 @app.get("/api/tickets")
 def read_tickets(current_user: dict = Depends(get_current_user)):
     require_permission(current_user["role"], "tickets.read")
-    return {"items": list_tickets_for_role(current_user["role"])}
+    return {"items": list_tickets_for_role(current_user["role"], current_user["email"])}
 
 
 @app.post("/api/tickets")
 def create_ticket(payload: dict = Body(...), current_user: dict = Depends(get_current_user)):
     require_permission(current_user["role"], "tickets.write")
-    ticket = create_ticket_record(payload, current_user["email"])
+    ticket = create_ticket_record(
+        {**payload, "user_email": current_user["email"], "assigned_to": None},
+        current_user["email"],
+    )
     return {"message": "Ticket created successfully", "ticket": ticket, "ticket_id": ticket["id"]}
+
+
+@app.post("/api/tickets/{ticket_id}/approve")
+def approve_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
+    require_permission(current_user["role"], "tickets.write")
+    try:
+        approve_ticket_record(ticket_id, current_user["email"], current_user["role"])
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"message": "Ticket approved successfully", "ticket_id": ticket_id}
 
 
 @app.patch("/api/tickets/{ticket_id}")
 def update_ticket(ticket_id: str, payload: dict = Body(...), current_user: dict = Depends(get_current_user)):
     require_permission(current_user["role"], "tickets.write")
+    if not any(ticket.get("id") == ticket_id for ticket in list_tickets_for_role(current_user["role"], current_user["email"])):
+        raise HTTPException(status_code=404, detail="Ticket not found in your access scope")
+    if str(payload.get("status", "")).upper() in {"APPROVED", "REJECTED"}:
+        raise HTTPException(status_code=400, detail="Use the ticket approval endpoint to change ticket approval status.")
     ticket = update_ticket_record(ticket_id, payload, current_user["email"])
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")

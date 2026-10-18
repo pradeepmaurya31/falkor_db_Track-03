@@ -27,4 +27,6 @@ class GraphExecutionAgent:
 
     @staticmethod
     def execute_ticket_approval(user_role, ticket_id, updated_by):
-        return GraphExecutionAgent.execute("Ticket", "approve", user_role, {"id": ticket_id, "updated_by": updated_by})
+        from backend.enterprise_data import approve_ticket_record
+
+        return approve_ticket_record(ticket_id, updated_by, user_role)

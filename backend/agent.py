@@ -13,13 +13,13 @@ from backend.database import get_falkordb_connection
 from backend.enterprise_data import (
     ATTENDANCE,
     HOLIDAYS,
-    TICKETS,
     USER_CATALOG,
     create_ticket_record,
     create_user_record,
     find_user_by_email,
     list_holidays_for_role,
     list_tickets_for_role,
+    approve_ticket_record,
     update_user_record,
 )
 from backend.graph_agent import GraphExecutionAgent
@@ -53,9 +53,31 @@ def is_employee_creation_request(message: str) -> bool:
         return True
     if re.search(r"\b(?:add|create|hire|new)\b.*\b(?:employee|user|staff)\b", msg):
         return True
+    if re.search(
+        r"\b(?:add|create|hire)\s+[a-z][a-z .'-]*?\s*,?\s*(?:and\s+)?e-?mail\b",
+        msg,
+    ):
+        return True
     if re.search(r"\b(?:can you|please)\s*(?:add|create|hire|new)\s+[a-z][a-z .'-]+\s*(?:,|and)?\s*(?:email|e-mail)\s*[:=]?", msg):
         return True
     return False
+
+
+def is_ticket_list_request(message: str) -> bool:
+    msg = (message or "").lower()
+    if not re.search(r"\btickets?\b", msg):
+        return False
+    list_command = re.search(
+        r"\b(show|list|view|check|display|find|status|details|latest|recent|last)\b",
+        msg,
+    )
+    my_ticket = re.search(r"\bmy\b.*\b(?:last|latest|recent|pending|assigned)?\s*tickets?\b", msg)
+    assigned_or_pending = re.search(
+        r"\b(?:assigned|pending)\b.*\btickets?\b|\btickets?\b.*\b(?:assigned|pending)\b",
+        msg,
+    )
+    open_tickets = re.search(r"\bopen\s+(?:pending\s+)?tickets?\b", msg)
+    return bool(list_command or my_ticket or assigned_or_pending or open_tickets)
 
 
 class AgentState(TypedDict):
@@ -97,9 +119,7 @@ def _build_employee_self_service_response(state: AgentState):
         return state
 
     if "ticket" in msg:
-        create_verbs = ["create", "raise", "new", "submit", "open"]
-        view_verbs = ["show", "list", "view", "check", "details", "last", "latest", "my", "recent"]
-        if any(token in msg for token in create_verbs) and not any(token in msg for token in view_verbs):
+        if state.get("intent") == "CREATE_TICKET":
             return None
 
         relevant = [
@@ -144,21 +164,7 @@ def intent_classifier_node(state: AgentState):
         state["intent"] = "CREATE_EMPLOYEE"
         state["requires_approval"] = False
     elif any(k in msg for k in ["ticket", "flight", "laptop", "cab", "leave", "asset", "travel"]):
-        ticket_query_patterns = [
-            "my ticket",
-            "my tickets",
-            "last ticket",
-            "latest ticket",
-            "recent ticket",
-            "show my ticket",
-            "show my tickets",
-            "view my ticket",
-            "check my ticket",
-            "details of my ticket",
-            "pending ticket",
-            "pending tickets",
-        ]
-        if any(pattern in msg for pattern in ticket_query_patterns):
+        if is_ticket_list_request(msg):
             state["intent"] = "GENERAL_QUERY"
             state["requires_approval"] = False
         else:
@@ -191,7 +197,13 @@ def parse_employee_creation_message(message: str):
     email = email_match.group(1).strip() if email_match else ""
 
     role_match = re.search(r"(?:role)\s*[:=]?\s*([A-Za-z]+)", message, re.IGNORECASE)
-    role = role_match.group(1).strip().title() if role_match else "Employee"
+    role_names = {
+        "superadmin": "SuperAdmin",
+        "admin": "Admin",
+        "manager": "Manager",
+        "employee": "Employee",
+    }
+    role = role_names.get(role_match.group(1).strip().lower(), "Employee") if role_match else "Employee"
 
     return {"name": name, "email": email, "role": role}
 
@@ -263,46 +275,42 @@ def ticket_slot_filler_node(state: AgentState):
             state["response"] = "Only supervisors can approve tickets."
             return state
         try:
-            GraphExecutionAgent.execute_ticket_approval(state["user_role"], ticket_id, state["user_email"])
+            approve_ticket_record(ticket_id, state["user_email"], state["user_role"])
+        except LookupError:
+            state["response"] = f"Ticket {ticket_id} was not found."
+            return state
+        except PermissionError:
+            state["response"] = f"Ticket {ticket_id} is not pending or is not assigned to you."
+            return state
         except Exception:
-            logger.warning("Ticket approval graph call failed; using in-memory fallback for user=%s ticket=%s", state.get("user_email"), ticket_id)
-        for ticket in TICKETS:
-            if ticket.get("id") == ticket_id:
-                ticket["status"] = "APPROVED"
-                ticket["updated_by"] = state["user_email"]
-                break
+            logger.exception("Ticket approval failed for user=%s ticket=%s", state.get("user_email"), ticket_id)
+            state["response"] = "The ticket could not be approved because of a database error. Please try again."
+            return state
         state["response"] = f"Ticket {ticket_id} has been approved successfully."
         return state
 
-    pending_match = re.search(r"\b(pending|open)\s+(?:ticket|tickets)\b|\bshow\s+me\s+(?:pending|open)\s+(?:ticket|tickets)\b", state["message"], re.IGNORECASE)
-    if pending_match:
-        tickets = list_tickets_for_role(state["user_role"])
-        if state["user_role"] == "Manager":
-            subordinate_emails = {
-                u["email"] for u in USER_CATALOG
-                if u.get("role") == "Employee" and (u.get("reporting_manager") or u.get("created_by") or "").lower() == state["user_email"].lower()
-            }
-            relevant = [
-                t for t in tickets
-                if not t.get("is_deleted", False)
-                and t.get("user_email") in subordinate_emails
-                and t.get("status") == "PENDING_MANAGER_APPROVAL"
-            ]
-        else:
-            relevant = [
-                t for t in tickets
-                if not t.get("is_deleted", False)
-                and (
-                    state["user_role"] in {"SuperAdmin", "Admin"}
-                    or t.get("user_email") == state["user_email"]
-                )
-                and t.get("status") == "PENDING_MANAGER_APPROVAL"
-            ]
+    if is_ticket_list_request(state["message"]):
+        relevant = list_tickets_for_role(state["user_role"], state["user_email"])
+        if "pending" in state["message"].lower() or "open ticket" in state["message"].lower():
+            relevant = [t for t in relevant if t.get("status") == "PENDING_MANAGER_APPROVAL"]
         if not relevant:
-            state["response"] = "There are no pending tickets in your current access scope."
+            state["response"] = "There are no tickets in your current access scope."
             return state
-        summary = "; ".join(f"{t['id']} ({t['type']})" for t in relevant)
-        state["response"] = f"Pending tickets: {summary}."
+        if re.search(r"\b(last|latest|recent)\b", state["message"], re.IGNORECASE):
+            latest = max(
+                relevant,
+                key=lambda ticket: str(ticket.get("updated_at") or ticket.get("created_at") or ""),
+            )
+            state["response"] = (
+                f"Your latest ticket is {latest['id']} with status {latest.get('status', 'PENDING_MANAGER_APPROVAL')} "
+                f"and type {latest.get('type', 'GENERAL')}."
+            )
+            return state
+        summary = "; ".join(
+            f"{t['id']} ({t.get('type', 'GENERAL')}, {t['status']})" for t in relevant[:20]
+        )
+        prefix = "Pending tickets" if "pending" in state["message"].lower() else "Tickets"
+        state["response"] = f"{prefix}: {summary}."
         return state
 
     if state["user_role"] == "Employee":
@@ -337,7 +345,7 @@ def ticket_slot_filler_node(state: AgentState):
             return state
 
         state["response"] = (
-            f"Employee {created['name']} has been added successfully. "
+            f"{created['role']} {created['name']} has been added successfully. "
             f"Login details: Email = {created['email']}, Password = {created['password']}."
         )
         return state

@@ -42,28 +42,6 @@ GRAPH_QUERY_LIBRARY = {
             RETURN u.email AS email, u.name AS name, u.status AS status
         """,
     },
-    "Ticket": {
-        "list_all": """
-            MATCH (t:Ticket)
-            RETURN t.id AS id, t.type AS type, t.status AS status, t.user_email AS user_email, t.priority AS priority
-        """,
-        "create": """
-            CREATE (t:Ticket {
-                id: $id,
-                type: $type,
-                status: $status,
-                priority: $priority,
-                user_email: $user_email,
-                comments: $comments
-            })
-            RETURN t.id AS id, t.type AS type, t.status AS status, t.user_email AS user_email
-        """,
-        "approve": """
-            MATCH (t:Ticket {id: $id})
-            SET t.status = 'APPROVED', t.updated_by = $updated_by
-            RETURN t.id AS id, t.status AS status
-        """,
-    },
     "Project": {
         "list_all": """
             MATCH (p:Project)
@@ -90,25 +68,21 @@ GRAPH_QUERY_LIBRARY = {
 ROLE_QUERY_POLICY = {
     "SuperAdmin": {
         "User": {"list_all", "get_by_email", "create", "update", "delete"},
-        "Ticket": {"list_all", "create", "approve"},
         "Project": {"list_all", "list_my_projects"},
         "Attendance": {"list_for_employee", "list_team"},
     },
     "Admin": {
         "User": {"list_all", "get_by_email", "create", "update", "delete"},
-        "Ticket": {"list_all", "create", "approve"},
         "Project": {"list_all", "list_my_projects"},
         "Attendance": {"list_for_employee", "list_team"},
     },
     "Manager": {
         "User": {"list_team", "get_by_email", "create"},
-        "Ticket": {"list_all", "create", "approve"},
         "Project": {"list_all", "list_my_projects"},
         "Attendance": {"list_for_employee", "list_team"},
     },
     "Employee": {
         "User": {"get_by_email"},
-        "Ticket": {"list_all", "create"},
         "Project": {"list_my_projects"},
         "Attendance": {"list_for_employee"},
     },

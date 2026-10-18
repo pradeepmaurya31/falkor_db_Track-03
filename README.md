@@ -12,7 +12,7 @@ The application is built around a simple enterprise operating model:
 - Each role has specific permissions for reading and writing users, projects, tickets, attendance, and holidays
 - A dashboard presents summary metrics and organization data based on the current user's access level
 - A chat assistant can handle restricted operational requests and supports employee creation through approved roles
-- The system supports FalkorDB-backed graph data and Gemini-based AI interactions
+- The system supports FalkorDB-backed graph database and Gemini-based AI interactions
 
 ## Product specification
 
@@ -111,7 +111,14 @@ flowchart TD
 4. The query runs against the FalkorDB graph
 5. The result is returned back to the dashboard or chat interface
 
-This keeps CRUD logic deterministic, permission-aware, and much faster than rewriting dynamic Cypher for every command.
+This keeps graph operations deterministic and permission-aware; ticket reads and approvals additionally use requester/assignee-scoped data functions.
+
+### Chat user and ticket access
+
+- Admins can add users, create tickets, approve pending tickets, and view tickets associated with their account.
+- Managers can view and approve tickets assigned to them; ticket assignment follows the requester's reporting manager.
+- Employees can create tickets and view only their own tickets.
+- Chat requests such as `Add Rajat Maurya email rajat@gmail.com role Manager`, `create a ticket for laptop`, `show my tickets`, and `approve INCIDENT123` are handled as explicit workflows.
 
 ## Environment configuration
 
@@ -149,24 +156,28 @@ Before running the project, make sure you have:
 
 ## Setup
 
-### 1. Open the project folder
+### 1. clone the project in your machine
 
 ```powershell
-cd C:\Users\pm923\OneDrive\Documents\Pradeep\Hackathon\folker_db_Track-03
+git clone https://github.com/pradeepmaurya31/falkor_db_Track-03.git
 ```
 
 ### 2. Create and activate the Python virtual environment
 
 ```powershell
 py -m venv .venv
+or
+uv venv
+
 .\.venv\Scripts\activate
 ```
 
 ### 3. Install backend dependencies
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install fastapi uvicorn python-dotenv PyJWT bcrypt google-genai langgraph
+python -m pip install -r requirements.txt
+or
+uv pip install -r requirements.txt
 ```
 
 If your environment already has the project dependencies installed in `.venv`, you can skip this step.
@@ -195,6 +206,8 @@ From the project root:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+or
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
 The backend will run on:

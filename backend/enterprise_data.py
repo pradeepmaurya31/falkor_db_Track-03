@@ -257,6 +257,8 @@ def _load_tickets_from_graph():
             """
             MATCH (t:Ticket)
             WHERE coalesce(t.is_deleted, false) = false
+            OPTIONAL MATCH (owner:User {email: t.user_email})
+            OPTIONAL MATCH (owner)-[:REPORTS_TO]->(manager:User)
             RETURN t.id AS id,
                    coalesce(t.type, 'GENERAL') AS type,
                    coalesce(t.status, 'PENDING_MANAGER_APPROVAL') AS status,
@@ -266,7 +268,12 @@ def _load_tickets_from_graph():
                    coalesce(t.created_at, timestamp()) AS created_at,
                    coalesce(t.updated_at, timestamp()) AS updated_at,
                    coalesce(t.created_by, '') AS created_by,
-                   coalesce(t.updated_by, '') AS updated_by
+                   coalesce(t.updated_by, '') AS updated_by,
+                   CASE
+                       WHEN coalesce(t.assigned_to, '') <> '' THEN t.assigned_to
+                       WHEN coalesce(owner.reporting_manager, '') <> '' THEN owner.reporting_manager
+                       ELSE coalesce(manager.email, '')
+                   END AS assigned_to
             ORDER BY t.created_at DESC
             """
         )
@@ -283,6 +290,7 @@ def _load_tickets_from_graph():
                 "updated_at": row[7],
                 "created_by": row[8],
                 "updated_by": row[9],
+                "assigned_to": row[10],
                 "is_deleted": False,
             })
         if tickets:
@@ -401,7 +409,8 @@ def _load_users_from_graph():
                    coalesce(u.is_deleted, false) AS is_deleted,
                    coalesce(u.comments, '') AS comments,
                    coalesce(u.created_by, '') AS created_by,
-                   coalesce(u.updated_by, '') AS updated_by
+                   coalesce(u.updated_by, '') AS updated_by,
+                   coalesce(u.reporting_manager, '') AS reporting_manager
             ORDER BY u.email
             """
         )
@@ -422,6 +431,7 @@ def _load_users_from_graph():
                 "comments": row[11],
                 "created_by": row[12],
                 "updated_by": row[13],
+                "reporting_manager": row[14],
             }
             users.append(user)
         return users
@@ -895,12 +905,16 @@ def generate_ticket_id():
 
 def create_ticket_record(payload, created_by):
     ticket_id = payload.get("id") or generate_ticket_id()
+    user_email = payload.get("user_email", created_by)
+    user = find_user_by_email(user_email)
+    assigned_to = payload.get("assigned_to") or (user or {}).get("reporting_manager", "")
     ticket = {
         "id": ticket_id,
         "type": payload.get("type", "GENERAL"),
         "status": payload.get("status", "PENDING_MANAGER_APPROVAL"),
         "priority": payload.get("priority", "MEDIUM"),
-        "user_email": payload.get("user_email", created_by),
+        "user_email": user_email,
+        "assigned_to": assigned_to,
         "comments": payload.get("comments", ""),
         "created_at": datetime.utcnow().isoformat() + "Z",
         "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -917,6 +931,7 @@ def create_ticket_record(payload, created_by):
                 t.status = $status,
                 t.priority = $priority,
                 t.user_email = $user_email,
+                t.assigned_to = $assigned_to,
                 t.comments = $comments,
                 t.created_by = $created_by,
                 t.updated_by = $updated_by,
@@ -930,6 +945,7 @@ def create_ticket_record(payload, created_by):
                 "status": ticket["status"],
                 "priority": ticket["priority"],
                 "user_email": ticket["user_email"],
+                "assigned_to": ticket["assigned_to"],
                 "comments": ticket["comments"],
                 "created_by": ticket["created_by"],
                 "updated_by": ticket["updated_by"],
@@ -972,8 +988,75 @@ def list_projects_for_role(role):
     return _load_projects_from_graph()
 
 
-def list_tickets_for_role(role):
-    return _load_tickets_from_graph()
+def list_tickets_for_role(role, user_email=None):
+    tickets = _load_tickets_from_graph()
+    if not user_email or role == "SuperAdmin":
+        return tickets
+
+    email = user_email.strip().lower()
+    if role == "Admin":
+        return [
+            ticket for ticket in tickets
+            if email in {
+                (ticket.get("user_email") or "").lower(),
+                (ticket.get("created_by") or "").lower(),
+                (ticket.get("assigned_to") or "").lower(),
+            }
+        ]
+    if role == "Manager":
+        return [
+            ticket for ticket in tickets
+            if (ticket.get("assigned_to") or "").lower() == email
+        ]
+    if role == "Employee":
+        return [
+            ticket for ticket in tickets
+            if (ticket.get("user_email") or "").lower() == email
+        ]
+    return []
+
+
+def approve_ticket_record(ticket_id, approved_by, role):
+    if role not in {"SuperAdmin", "Admin", "Manager"}:
+        raise PermissionError("This role cannot approve tickets.")
+
+    graph = get_falkordb_connection()
+    result = graph.query(
+        """
+        MATCH (t:Ticket {id: $id})
+        OPTIONAL MATCH (owner:User {email: t.user_email})
+        OPTIONAL MATCH (owner)-[:REPORTS_TO]->(manager:User)
+        WITH t, CASE
+            WHEN coalesce(t.assigned_to, '') <> '' THEN t.assigned_to
+            WHEN coalesce(owner.reporting_manager, '') <> '' THEN owner.reporting_manager
+            ELSE coalesce(manager.email, '')
+        END AS assigned_to
+        WHERE coalesce(t.status, 'PENDING_MANAGER_APPROVAL') = 'PENDING_MANAGER_APPROVAL'
+          AND ($role <> 'Manager' OR assigned_to = $approver)
+        SET t.status = 'APPROVED',
+            t.updated_by = $approver,
+            t.updated_at = $updated_at
+        RETURN t.id AS id
+        """,
+        {
+            "id": ticket_id,
+            "role": role,
+            "approver": approved_by.strip().lower(),
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        },
+    )
+    if result.result_set:
+        for ticket in TICKETS:
+            if ticket.get("id") == ticket_id:
+                ticket["status"] = "APPROVED"
+                ticket["updated_by"] = approved_by
+                break
+        return ticket_id
+
+    existing = graph.query("MATCH (t:Ticket {id: $id}) RETURN t.id", {"id": ticket_id})
+    if not existing.result_set:
+        raise LookupError(f"Ticket {ticket_id} was not found.")
+    raise PermissionError("Ticket is not pending or is not assigned to this manager.")
 
 
 def upsert_attendance_for_user(email, in_time=None, out_time=None, comment=None):
